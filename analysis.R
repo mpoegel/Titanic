@@ -19,7 +19,7 @@ train.column.types <- c("integer",   # PassengerId
                         "character", # Ticket
                         "numeric",   # Fare
                         "character", # Cabin
-                        "factor"    # Embarked
+                        "factor"     # Embarked
                         )
 test.column.types <- train.column.types[-2] # copy all except the second column because the
                                             # test data has no survived column
@@ -116,6 +116,63 @@ title.ages.stats <- bystats(df.train$Age, df.train$Title,
 titles.na.train <- names(which(title.ages.stats[,2] > 0))
 # chop off "ALL"
 titles.na.train <- titles.na.train[1:length(titles.na.train)-1]
+
+# wrapper function to impute missing values based on the median
+imputeMedian <- function(impute.var, filter.var, var.levels) {
+  for (v in var.levels) {
+    impute.var[ which(filter.var == v) ] <- impute(impute.var[
+      which( filter.var == v )])
+  }
+  return (impute.var)
+}
+
+# impute the missing ages based on the medians of the titles
+df.train$Age <- imputeMedian(df.train$Age, df.train$Title, titles.na.train)
+
+# replace the missing values in the embarked column with 'S'
+df.train$Embarked[which(is.na(df.train$Embarked))] <- 'S'
+
+# we conclude that the zero fares are most likely errors (they are not given to babies)
+# so we again impute the missing fares base on the median on the passenger's class
+df.train$Fare[ which(df.train$Fare == 0) ] <- NA
+df.train$Fare <- imputeMedian(df.train$Fare, df.train$Pclass,
+                              as.numeric(levels(df.train$Pclass)))
+
+# factor the titles, adding a new Noble level
+df.train$Title <- factor(df.train$Title, c(unique(df.train$Title), "Noble"))
+# box plot of the passenger ages by title
+boxplot(df.train$Age ~ df.train$Title,
+        main = "Passenger Age by Title",
+        xlab = "Honorific", ylab = "Age")
+
+# function to reassign titles (to group them together)
+changeTitles <- function(data, old.titles, new.title) {
+  for (honorific in old.titles) {
+    data$Title[ which(data$Title == honorific) ] <- new.title
+  }
+  return (data$Title)
+}
+
+# consolidate the titles
+df.train$Title <- changeTitles(df.train, c("Capt", "Col", "Don", "Dr", "Jonkheer",
+                                           "Lady", "Major", "Rev", "Sir",
+                                           "the Countess"), "Noble")
+df.train$Title <- changeTitles(df.train, c("Mme", "Mlle", "Ms"), "Miss")
+
+# engineer a new feature based on the idea of women and childen first
+df.train$Boat.dibs <- "No"
+df.train$Boat.dibs[ which(df.train$Sex == "female" | df.train$Age < 15)] <- "Yes"
+df.train$Boat.dibs <- as.factor(df.train$Boat.dibs)
+
+# engineer a 'family' feature
+df.train$Family <- df.train$SibSp + df.train$Parch
+
+# engineer a fare per person in case some of the fares were paid together as families
+df.train$Fare.pp <- df.train$Fare / (df.train$Family + 1)
+
+
+
+
 
 
 
