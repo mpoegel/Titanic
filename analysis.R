@@ -159,6 +159,11 @@ df.train$Title <- changeTitles(df.train, c("Capt", "Col", "Don", "Dr", "Jonkheer
                                            "the Countess"), "Noble")
 df.train$Title <- changeTitles(df.train, c("Mme", "Mlle", "Ms"), "Miss")
 
+require(plyr)
+# revalue the survived column to the Fate columns with 1s and 0s
+df.train$Fate <- df.train$Survived
+df.train$Fate <- revalue(df.train$Fate, c("1" = "Survived", "0" = "Perished"))
+
 # engineer a new feature based on the idea of women and childen first
 df.train$Boat.dibs <- "No"
 df.train$Boat.dibs[ which(df.train$Sex == "female" | df.train$Age < 15)] <- "Yes"
@@ -170,10 +175,148 @@ df.train$Family <- df.train$SibSp + df.train$Parch
 # engineer a fare per person in case some of the fares were paid together as families
 df.train$Fare.pp <- df.train$Fare / (df.train$Family + 1)
 
+train.keeps <- c("Fate", "Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Cabin",
+                 "Embarked", "Title", "Boat.dibs", "Family", "Fare.pp")
+df.train.munged <- df.train[train.keeps]
+
+
+# -----------------------------------------------------------------------------
+# Creating the Models
+
+require(caret)
+# split the data into training and testing sets 80/20
+set.seed(27)
+training.rows <- createDataPartition(df.train.munged$Survived,
+                                    p = 0.8, list = FALSE)
+train.batch <- df.train.munged[  training.rows, ]
+test.batch  <- df.train.munged[ -training.rows, ]
+
+# Logistic Regression Model (Generalized Linear Model)
+Titanic.logit.1 <- glm(Fate ~ Sex + Pclass + Age + Embarked + Family + Fare, 
+                       data = train.batch, family = binomial("logit"))
+Titanic.logit.1.chisq <- pchisq(Titanic.logit.1$null.deviance - Titanic.logit.1$deviance,
+                                Titanic.logit.1$df.null - Titanic.logit.1$df.residual)
+anova(Titanic.logit.1, test = "Chisq")
+
+Titanic.logit.2 <- glm(Fate ~ Sex + Pclass + Age + Family + Embarked + Fare.pp,
+                       data = train.batch, family = binomial("logit"))
+anova(Titanic.logit.2, test = "Chisq")
+
+Titanic.logit.3 <- glm(Fate ~ Sex + Pclass + Age + Family + Embarked,
+                       data = train.batch, family = binomial("logit"))
+
+
+# Define a control function to handle optional arguments for train function
+#   models to be assesed based on the largest absolute area under the ROC
+#   curve
+# 3 times 10 fold cross validation
+cv.ctrl <- trainControl(method = "repeatedcv", repeats = 3,
+                        summaryFunction = twoClassSummary,
+                        classProbs = TRUE)
+require(pROC)
+# generate a new GLM
+glm.tune.1 <- train(Fate ~ Sex + Fate + Age + Family + Embarked,
+                    data = train.batch,
+                    method = "glm",
+                    metric = "ROC",
+                    trControl = cv.ctrl)
+summary(glm.tune.1)
+
+#compress the embarked class to just the Southampton Port
+glm.tune.2 <- train(Fate ~ Sex + Fate + Age + Family + I(Embarked == "S"),
+                    data = train.batch,
+                    method = "glm",
+                    metric = "ROC",
+                    trControl = cv.ctrl)
+summary(glm.tune.2)
+
+# try adding the Title factor
+glm.tune.3 <- train(Fate ~ Sex + Pclass + Title + Age + Family + I(Embarked == "S"),
+                    data = train.batch,
+                    method = "glm",
+                    metric = "ROC",
+                    trControl = cv.ctrl)
+summary(glm.tune.3)
+
+# drop the Age factor and collapse the Title factor
+glm.tune.4 <- train(Fate ~ Sex + Pclass + I(Title == "Mr") + I(Title == "Noble")
+                      + Family + I(Embarked == "S"),
+                    data = train.batch,
+                    method = "glm",
+                    metric = "ROC",
+                    trControl = cv.ctrl)
+summary(glm.tune.4)
+
+# emphasize the idea that young men in third class probably had a hard time 
+#   finding their way out
+glm.tune.5 <- train(Fate ~ Sex + Pclass + I(Title == "Mr") 
+                      + I(Title == "Noble") + Age + Family 
+                      + I(Embarked == "S") + I(Title == "Mr" & Pclass == 3),
+                    data = train.batch,
+                    method = "glm",
+                    metric = "ROC",
+                    trControl = cv.ctrl)
+summary(glm.tune.5)
+
+
+# -----------------------------------------------------------------------------
+# Evaluate the Models
+
+require(e1071) # what a name for a library...
+
+# make predictions using the linear model
+glm.pred <- predict(glm.tune.5, test.batch)
+confusionMatrix(glm.pred, test.batch$Fate)
 
 
 
 
+# -----------------------------------------------------------------------------
+# Make Predictions on the Kaggle Test Data
 
+# get the titles
+df.infer$Title <- getTitle(df.infer)
 
+# impute the missing age values
+df.infer$Title <- changeTitles(df.infer, c("Dona", "Ms"), "Mrs")
+titles.na.test <- c("Master", "Mrs", "Miss", "Mr")
+df.infer$Age <- imputeMedian(df.infer$Age, df.infer$Title, titles.na.test)
+
+# consolidate the titles
+df.infer$Title <- changeTitles(df.infer, c("Col", "Dr", "Rev"), "Noble")
+df.infer$Title <- changeTitles(df.infer, c("Mlle", "Mme"), "Miss")
+df.infer$Title <- as.factor(df.infer$Title)
+
+#inpute the missing fares
+df.infer$Fare[ which( df.infer$Fare == 0 )] <- NA
+df.infer$Fare <- imputeMedian(df.infer$Fare, df.infer$Pclass,
+                              as.numeric(levels(df.infer$Pclass)))
+
+# engineer a new feature based on the idea of women and childen first
+df.infer$Boat.dibs <- "No"
+df.infer$Boat.dibs[ which(df.infer$Sex == "female" | df.infer$Age < 15)] <- "Yes"
+df.infer$Boat.dibs <- as.factor(df.infer$Boat.dibs)
+
+# engineer a 'family' feature
+df.infer$Family <- df.infer$SibSp + df.infer$Parch
+
+# engineer a fare per person in case some of the fares were paid together as families
+df.infer$Fare.pp <- df.infer$Fare / (df.infer$Family + 1)
+
+# grab the data used for the predictions
+test.keeps <- train.keeps[-1]
+test.keeps <- test.keeps[-13]
+pred.these <- df.infer[test.keeps]
+
+# use the logistic regression model to generate the predictions
+Survived <- predict(glm.tune.5, newdata = pred.these)
+Survived <- revalue(Survived, c("Survived" = 1, "Perished" = 0))
+predictions <-as.data.frame(Survived)
+predictions$PassengerId <- df.infer$PassengerId
+
+# write predictions to the csv to submit on Kaggle
+write.csv(predictions[, c("PassengerId", "Survived")],
+          file = "Titantic_Predictions.csv",
+          row.names = FALSE,
+          quote = FALSE)
 
